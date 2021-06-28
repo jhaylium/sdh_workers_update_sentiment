@@ -1,6 +1,8 @@
 import boto3, json, psycopg2, os, logging, traceback
 from dotenv import load_dotenv
+from app.Postgres import PostgresDB
 from datetime import datetime
+from time import time
 
 
 def log_text(customer, msg, project):
@@ -19,14 +21,11 @@ cursor = conn.cursor()
 cursor.execute(cmd)
 # conn.close()
 twitter_projects = cursor.fetchall()
-print(twitter_projects)
-
 lam = boto3.client('lambda', aws_access_key_id=os.environ.get('aws_admin_access_key'),
                      aws_secret_access_key=os.environ.get('aws_admin_secret_key'),
                      region_name=os.environ.get('aws_admin_region'))
 
-queue_name = 'sdh-sentiment-processing-errors'
-
+start = time()
 for i in twitter_projects:
     project = i[0]
     project_id = project['project_id']
@@ -39,27 +38,37 @@ for i in twitter_projects:
         cursor.execute(get_fields_cmd)
         sentiment_fields = cursor.fetchall()
         sentiment_fields = [field[0] for field in sentiment_fields]
-
         project['sentiment_fields'] = sentiment_fields
-        logging.info(log_text(customer=customer_id, msg=f"Message {project_name} Sent to {queue_name}", project=project_name))
         responses_cmd = f"select tweet_id from {project['schema_name']}.{project['internal_project_name']}"
         cursor.execute(responses_cmd)
         responses = [x[0] for x in cursor.fetchall()]
         project['responses'] = responses
-        print(project)
-
         lam.invoke(
             FunctionName="sdh_process_twitter_sentiment",
             InvocationType="Event",
             Payload=json.dumps(project)
         )
+        payload = {"customer_id": customer_id,
+                   "project_id": project_id,
+                   "event_name": "Call Twitter Lambdas",
+                   "event_status": "0",
+                   "event_timestamp": datetime.utcnow(),
+                   "event_message": "Success",
+                   "duration": time() - start}
+        db_logger = PostgresDB()
+        db_logger.insert_event(payload)
     except Exception:
-        sqs = boto3.resource('sqs', aws_access_key_id=os.environ.get('aws_admin_access_key'),
-                             aws_secret_access_key=os.environ.get('aws_admin_secret_key'),
-                             region_name=os.environ.get('aws_admin_region'))
-        failure_queue = sqs.get_queue_by_name(QueueName=queue_name)
         error_message = traceback.format_exc()
-        logging.error(log_text(customer=customer_id, msg=f"\n{error_message}", project=project_name))
+        error_message = error_message[:999].replace("'", "").replace('"', '')
+        payload = {"customer_id": customer_id,
+         "project_id": project_id,
+         "event_name": "Call Twitter Lambdas",
+         "event_status": "-1",
+         "event_timestamp": datetime.utcnow(),
+         "event_message": "Success",
+         "duration": time() - start}
+        db_logger = PostgresDB()
+        db_logger.insert_event(payload)
         continue
 
 
